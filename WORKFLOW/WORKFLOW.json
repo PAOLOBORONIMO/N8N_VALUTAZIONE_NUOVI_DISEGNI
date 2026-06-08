@@ -1,1 +1,395 @@
-{"meta": {"instanceId": "N8N_VALUTAZIONE_NUOVI_DISEGNI"},"nodes": [],"connections": {}}
+{
+  "name": "VALUTAZIONE NUOVI DISEGNI",
+  "nodes": [
+    {
+      "parameters": {
+        "pollTimes": {
+          "item": [{"mode": "everyMinute"}]
+        },
+        "mailbox": "INBOX",
+        "options": {
+          "allowUnauthorizedCerts": false,
+          "downloadAttachments": true,
+          "dataPropertyAttachmentsPrefixName": "attachment_"
+        }
+      },
+      "id": "node-gmail-trigger",
+      "name": "📧 Ricezione Mail Gmail",
+      "type": "n8n-nodes-base.emailReadImap",
+      "typeVersion": 2,
+      "position": [240, 400],
+      "credentials": {
+        "imap": {"id": "INSERIRE_ID_CREDENZIALE_GMAIL", "name": "Gmail IMAP"}
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Estrae i dati essenziali dalla mail per la classificazione\nconst item = $input.first();\nconst mail = item.json;\n\nconst mittente = mail.from || '';\nconst oggetto  = mail.subject || '';\nconst corpo    = mail.text || mail.html || '';\n\n// Conta allegati PDF\nconst tutteLeChiavi = Object.keys(item.json);\nconst allegatiPdf = tutteLeChiavi.filter(k => k.startsWith('attachment_') && \n  (item.json[k]?.mimeType === 'application/pdf' || \n   (item.json[k]?.fileName || '').toLowerCase().endsWith('.pdf')));\n\nreturn [{\n  json: {\n    mittente,\n    oggetto,\n    corpo: corpo.substring(0, 2000),\n    haAllegatiPdf: allegatiPdf.length > 0,\n    numAllegatiPdf: allegatiPdf.length,\n    chiaviallegati: allegatiPdf,\n    dataRicezione: new Date().toISOString()\n  },\n  binary: item.binary\n}];"
+      },
+      "id": "node-prepara-dati",
+      "name": "⚙️ Prepara Dati Mail",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [460, 400]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.groq.com/openai/v1/chat/completions",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {"name": "Authorization", "value": "Bearer GROQ_API_KEY_QUI"},
+            {"name": "Content-Type", "value": "application/json"}
+          ]
+        },
+        "sendBody": true,
+        "contentType": "json",
+        "body": {
+          "model": "llama-3.3-70b-versatile",
+          "max_tokens": 100,
+          "temperature": 0,
+          "messages": [
+            {
+              "role": "system",
+              "content": "Sei un classificatore di email per un'officina di carpenteria metallica. Rispondi SOLO con una di queste parole esatte: ORDINE, OFFERTA, APPROVVIGIONAMENTO, SPAM, INFO"
+            },
+            {
+              "role": "user",
+              "content": "=`Classifica questa email:\nMITTENTE: ${$json.mittente}\nOGGETTO: ${$json.oggetto}\nCORPO: ${$json.corpo}`"
+            }
+          ]
+        }
+      },
+      "id": "node-classifica-mail",
+      "name": "🤖 Classifica Mail (Groq)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [680, 400]
+    },
+    {
+      "parameters": {
+        "jsCode": "const item = $input.first();\nconst risposta = item.json?.choices?.[0]?.message?.content?.trim().toUpperCase() || 'INFO';\nconst categorie = ['ORDINE','OFFERTA','APPROVVIGIONAMENTO','SPAM','INFO'];\nconst categoria = categorie.find(c => risposta.includes(c)) || 'INFO';\n\nreturn [{\n  json: {\n    ...item.json,\n    classificazione: categoria\n  }\n}];"
+      },
+      "id": "node-estrai-classificazione",
+      "name": "📋 Estrai Classificazione",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [900, 400]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {"caseSensitive": false},
+          "conditions": [
+            {
+              "id": "cond-ordine-offerta",
+              "leftValue": "={{ $json.classificazione }}",
+              "rightValue": "ORDINE",
+              "operator": {"type": "string", "operation": "equals"}
+            },
+            {
+              "id": "cond-offerta",
+              "leftValue": "={{ $json.classificazione }}",
+              "rightValue": "OFFERTA",
+              "operator": {"type": "string", "operation": "equals"}
+            }
+          ],
+          "combinator": "any"
+        }
+      },
+      "id": "node-if-ordine-offerta",
+      "name": "🔀 È Ordine o Offerta?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [1120, 400]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "conditions": [
+            {
+              "id": "cond-ha-pdf",
+              "leftValue": "={{ $json.haAllegatiPdf }}",
+              "rightValue": true,
+              "operator": {"type": "boolean", "operation": "equals"}
+            }
+          ]
+        }
+      },
+      "id": "node-if-ha-pdf",
+      "name": "📎 Ha Allegati PDF?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [1340, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Estrae il nome del cliente dal mittente email\nconst item = $input.first();\nconst mittente = item.json.mittente || '';\n\n// Estrae nome dal formato: \"Nome Cognome <email@dominio.it>\"\nlet nomeCliente = 'CLIENTE_SCONOSCIUTO';\nconst matchNome = mittente.match(/^([^<]+)/);\nif (matchNome) {\n  nomeCliente = matchNome[1].trim()\n    .toUpperCase()\n    .replace(/[^A-Z0-9\\s]/g, '')\n    .replace(/\\s+/g, '_')\n    .substring(0, 30);\n}\n\nif (!nomeCliente || nomeCliente.length < 2) {\n  // Fallback: usa dominio email\n  const matchEmail = mittente.match(/@([^.>]+)/);\n  nomeCliente = matchEmail ? matchEmail[1].toUpperCase() : 'CLIENTE_SCONOSCIUTO';\n}\n\nconst timestamp = new Date().toISOString().replace(/[:.]/g, '-').substring(0, 19);\nconst cartellaCliente = `/data/valutazione/${nomeCliente}`;\nconst cartellaSessione = `${cartellaCliente}/${timestamp}`;\n\nreturn [{\n  json: {\n    ...item.json,\n    nomeCliente,\n    cartellaCliente,\n    cartellaSessione,\n    timestamp\n  },\n  binary: item.binary\n}];"
+      },
+      "id": "node-estrai-cliente",
+      "name": "👤 Estrai Nome Cliente",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1560, 200]
+    },
+    {
+      "parameters": {
+        "command": "={{ `mkdir -p \"${$json.cartellaSessione}\" && echo OK` }}"
+      },
+      "id": "node-crea-cartella",
+      "name": "📁 Crea Cartella Cliente",
+      "type": "n8n-nodes-base.executeCommand",
+      "typeVersion": 1,
+      "position": [1780, 200]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Prepara la lista degli allegati PDF da processare\nconst item = $input.first();\nconst chiavi = item.json.chiaviallegati || [];\n\nif (chiavi.length === 0) {\n  return [{ json: { ...item.json, errore: 'Nessun allegato PDF trovato' } }];\n}\n\n// Crea un item per ogni allegato PDF\nreturn chiavi.map((chiave, index) => {\n  const allegato = item.json[chiave] || {};\n  const nomeFile = (allegato.fileName || `disegno_${index + 1}.pdf`)\n    .toUpperCase()\n    .replace(/\\s+/g, '_');\n  \n  return {\n    json: {\n      ...item.json,\n      chiaveAllegato: chiave,\n      nomeFilePdf: nomeFile,\n      nomeFilePdfBase: nomeFile.replace('.PDF', ''),\n      percorsoFilePdf: `${item.json.cartellaSessione}/${nomeFile}`,\n      percorsoFilePng: `${item.json.cartellaSessione}/${nomeFile.replace('.PDF', '.PNG')}`,\n      indiceAllegato: index + 1,\n      totaleAllegati: chiavi.length\n    },\n    binary: item.binary\n  };\n});"
+      },
+      "id": "node-prepara-loop",
+      "name": "🔄 Prepara Loop Allegati",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [2000, 200]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Salva il PDF allegato su disco\nconst item = $input.first();\nconst fs = require('fs');\n\ntry {\n  const chiave = item.json.chiaveAllegato;\n  const binaryData = item.binary?.[chiave];\n  \n  if (!binaryData) {\n    throw new Error(`Binary data non trovato per chiave: ${chiave}`);\n  }\n  \n  // Decodifica base64 e salva\n  const buffer = Buffer.from(binaryData.data, 'base64');\n  fs.writeFileSync(item.json.percorsoFilePdf, buffer);\n  \n  return [{\n    json: {\n      ...item.json,\n      pdfSalvato: true,\n      dimensionePdf: buffer.length\n    }\n  }];\n} catch(e) {\n  return [{\n    json: {\n      ...item.json,\n      pdfSalvato: false,\n      errore: e.message\n    }\n  }];\n}"
+      },
+      "id": "node-salva-pdf",
+      "name": "💾 Salva PDF su Disco",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [2220, 200]
+    },
+    {
+      "parameters": {
+        "command": "={{ `gs -dNOPAUSE -dBATCH -sDEVICE=png16m -r150 -dFirstPage=1 -dLastPage=1 -sOutputFile=\"${$json.percorsoFilePng}\" \"${$json.percorsoFilePdf}\" 2>&1 && echo CONVERSIONE_OK` }}"
+      },
+      "id": "node-converti-png",
+      "name": "🖼️ Converti PDF → PNG (Ghostscript)",
+      "type": "n8n-nodes-base.executeCommand",
+      "typeVersion": 1,
+      "position": [2440, 200]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Legge il PNG e lo converte in base64 per Groq Vision\nconst item = $input.first();\nconst fs = require('fs');\n\ntry {\n  const percorsoPng = item.json.percorsoFilePng;\n  \n  if (!fs.existsSync(percorsoPng)) {\n    throw new Error(`PNG non trovato: ${percorsoPng}`);\n  }\n  \n  const buffer = fs.readFileSync(percorsoPng);\n  const base64 = buffer.toString('base64');\n  \n  return [{\n    json: {\n      ...item.json,\n      pngBase64: base64,\n      pngLetto: true\n    }\n  }];\n} catch(e) {\n  return [{\n    json: {\n      ...item.json,\n      pngLetto: false,\n      errore: e.message\n    }\n  }];\n}"
+      },
+      "id": "node-leggi-png",
+      "name": "📖 Leggi PNG → Base64",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [2660, 200]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.groq.com/openai/v1/chat/completions",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {"name": "Authorization", "value": "Bearer GROQ_API_KEY_QUI"},
+            {"name": "Content-Type", "value": "application/json"}
+          ]
+        },
+        "sendBody": true,
+        "contentType": "json",
+        "body": {
+          "model": "meta-llama/llama-4-scout-17b-16e-instruct",
+          "max_tokens": 2000,
+          "temperature": 0,
+          "messages": [
+            {
+              "role": "user",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "=`Sei un tecnico preventivista senior specializzato in carpenteria metallica e lavorazione lamiera.\nAnalizza questo disegno tecnico 2D e produci il CICLO DI LAVORO del pezzo.\n\nMACCHINE DISPONIBILI INTERNAMENTE:\n- LASER LAMIERA: campo max 1500x3000mm (se sviluppo supera -> ESTERNO)\n- LASER TUBO: L.6000mm, tondo max Ø200, quadrato max 200x200\n- SEGA A NASTRO: taglio tondi/tubolari/piatti/angolari\n- PIEGATRICE CNC: 3000mm / 220t (se sviluppo piega supera 3000mm -> ESTERNO)\n- TRAPANO A COLONNA: foratura manuale\n- TRAPANO FRESA CNC: foratura/fresatura/filettatura CNC\n\nMATERIALI INTERNI OK: S235, S355, DX51, AISI 304, AISI 316, AL 5754 H111, AL 6082\nLAMIERE: spessori 0.8-25mm (AL e INOX max 15mm), formati max 1500x3000\nTUBOLARI/TUBI: tutti i commerciali fino 200x200 / Ø200\nTONDI/PIATTI/ANGOLARI: tutti i commerciali\n\nTRATTAMENTI: SEMPRE ESTERNALIZATI (verniciatura, zincatura, brunitura)\nSALDATURA: SEMPRE ESTERNALIZZATA\n\nNome file: ${$json.nomeFilePdf}\n\nRispondi ESCLUSIVAMENTE con JSON valido, nessun testo prima o dopo:\n{\n  \"codice\": \"\",\n  \"revisione\": \"\",\n  \"nome_file_originale\": \"\",\n  \"nome_file_convertito\": \"\",\n  \"descrizione\": \"\",\n  \"materiale\": \"\",\n  \"materiale_interno_ok\": true,\n  \"formato\": \"\",\n  \"spessore_mm\": 0,\n  \"spessore_interno_ok\": true,\n  \"prodotto\": \"\",\n  \"trattamenti\": [],\n  \"saldatura\": false,\n  \"accessori_carpenteria\": [],\n  \"fasi\": [\n    {\"ordine\": 1, \"categoria\": \"\", \"fase\": \"\", \"dettaglio\": \"\", \"interno_ok\": true}\n  ],\n  \"lavorazioni_non_eseguibili\": [],\n  \"confidenza_dati_critici\": \"\",\n  \"campi_da_verificare\": [],\n  \"note\": \"\",\n  \"fasi_testo\": \"\",\n  \"problematiche_testo\": \"\"\n}`"
+                },
+                {
+                  "type": "image_url",
+                  "image_url": {
+                    "url": "={{ `data:image/png;base64,${$json.pngBase64}` }}"
+                  }
+                }
+              ]
+            }
+          ]
+        }
+      },
+      "id": "node-groq-vision",
+      "name": "🤖 Groq Vision → Analisi Disegno",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [2880, 200]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Parsa il JSON restituito da Groq e lo salva su disco\nconst item = $input.first();\nconst fs = require('fs');\n\ntry {\n  let testoRisposta = item.json?.choices?.[0]?.message?.content || '{}';\n  \n  // Rimuove eventuali markdown code fences\n  testoRisposta = testoRisposta\n    .replace(/```json/gi, '')\n    .replace(/```/g, '')\n    .trim();\n  \n  const analisi = JSON.parse(testoRisposta);\n  \n  // Salva JSON analisi su disco\n  const percorsoJson = item.json.percorsoFilePdf.replace('.PDF', '_ANALISI.json').replace('.pdf', '_ANALISI.json');\n  fs.writeFileSync(percorsoJson, JSON.stringify(analisi, null, 2), 'utf8');\n  \n  return [{\n    json: {\n      ...item.json,\n      analisi,\n      percorsoJson,\n      analisiOk: true,\n      fasiTesto: analisi.fasi_testo || 'N/D',\n      problematiche: analisi.problematiche_testo || 'Nessuna'\n    }\n  }];\n} catch(e) {\n  return [{\n    json: {\n      ...item.json,\n      analisiOk: false,\n      errore: `Errore parsing JSON Groq: ${e.message}`,\n      rispostaGrezzo: item.json?.choices?.[0]?.message?.content\n    }\n  }];\n}"
+      },
+      "id": "node-parsa-analisi",
+      "name": "📊 Parsa Analisi Groq",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [3100, 200]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Annota il PDF con le fasi estratte usando ghostscript\n// Genera uno script ps per aggiungere testo al PDF\nconst item = $input.first();\nconst fs = require('fs');\n\ntry {\n  const analisi = item.json.analisi || {};\n  const fasi = analisi.fasi || [];\n  const percorsoPdfInput = item.json.percorsoFilePdf;\n  const percorsoPdfOutput = percorsoPdfInput.replace('.PDF', '_ANNOTATO.PDF').replace('.pdf', '_ANNOTATO.pdf');\n  \n  // Costruisce il testo annotazione\n  const righeAnnotazione = [];\n  righeAnnotazione.push(`CODICE: ${analisi.codice || 'N/D'}  |  MATERIALE: ${analisi.materiale || 'N/D'}  |  SP: ${analisi.spessore_mm || 'N/D'} mm`);\n  righeAnnotazione.push(`DESCRIZIONE: ${analisi.descrizione || 'N/D'}`);\n  righeAnnotazione.push(`CICLO: ${analisi.fasi_testo || 'N/D'}`);\n  if (analisi.trattamenti && analisi.trattamenti.length > 0) {\n    const tratt = analisi.trattamenti.map(t => t.tipo).join(', ');\n    righeAnnotazione.push(`TRATTAMENTI: ${tratt}`);\n  }\n  if (analisi.saldatura) {\n    righeAnnotazione.push('⚠️ SALDATURA: ESTERNALIZZARE');\n  }\n  if (analisi.problematiche_testo && analisi.problematiche_testo !== 'Nessuna') {\n    righeAnnotazione.push(`⚠️ PROBLEMATICHE: ${analisi.problematiche_testo}`);\n  }\n  \n  // Salva testo annotazione come file separato\n  const percorsoTxt = percorsoPdfInput.replace('.PDF', '_CICLO.txt').replace('.pdf', '_CICLO.txt');\n  fs.writeFileSync(percorsoTxt, righeAnnotazione.join('\\n'), 'utf8');\n  \n  return [{\n    json: {\n      ...item.json,\n      percorsoPdfOutput,\n      percorsoTxt,\n      righeAnnotazione,\n      pdfProntoPerAnnotazione: true\n    }\n  }];\n} catch(e) {\n  return [{\n    json: {\n      ...item.json,\n      pdfProntoPerAnnotazione: false,\n      errore: e.message\n    }\n  }];\n}"
+      },
+      "id": "node-prepara-annotazione",
+      "name": "✏️ Prepara Annotazione PDF",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [3320, 200]
+    },
+    {
+      "parameters": {
+        "command": "={{ `gs -dBATCH -dNOPAUSE -sDEVICE=pdfwrite \\\n  -sOutputFile=\"${$json.percorsoPdfOutput}\" \\\n  -c \"<< /BeginPage { \\\n    gsave \\\n    0.95 0.95 0.8 setrgbcolor \\\n    0 0 595 80 rectfill \\\n    grestore \\\n    0 0 0 setrgbcolor \\\n    /Helvetica-Bold findfont 7 scalefont setfont \\\n    10 68 moveto (CICLO DI LAVORO - ANALISI AUTOMATICA N8N) show \\\n    /Helvetica findfont 6 scalefont setfont \\\n    10 56 moveto (${$json.righeAnnotazione[0] || ''}) show \\\n    10 46 moveto (${$json.righeAnnotazione[1] || ''}) show \\\n    10 36 moveto (${$json.righeAnnotazione[2] || ''}) show \\\n    10 26 moveto (${$json.righeAnnotazione[3] || ''}) show \\\n    10 16 moveto (${$json.righeAnnotazione[4] || ''}) show \\\n  } bind >> setpagedevice\" \\\n  -f \"${$json.percorsoFilePdf}\" 2>&1 && echo ANNOTAZIONE_OK` }}"
+      },
+      "id": "node-annota-pdf",
+      "name": "🖊️ Annota PDF (Ghostscript)",
+      "type": "n8n-nodes-base.executeCommand",
+      "typeVersion": 1,
+      "position": [3540, 200]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Log finale dell'elaborazione\nconst item = $input.first();\nconst output = item.json?.stdout || '';\nconst annotazioneOk = output.includes('ANNOTAZIONE_OK');\n\nconst riepilogo = {\n  cliente: item.json.nomeCliente,\n  file: item.json.nomeFilePdf,\n  cartella: item.json.cartellaSessione,\n  codice: item.json.analisi?.codice || 'N/D',\n  materiale: item.json.analisi?.materiale || 'N/D',\n  spessore: item.json.analisi?.spessore_mm || 'N/D',\n  ciclo: item.json.analisi?.fasi_testo || 'N/D',\n  problematiche: item.json.analisi?.problematiche_testo || 'Nessuna',\n  annotazioneOk,\n  timestamp: item.json.timestamp,\n  fileGenerati: [\n    item.json.percorsoFilePdf,\n    item.json.percorsoFilePng,\n    item.json.percorsoJson,\n    item.json.percorsoTxt,\n    item.json.percorsoPdfOutput\n  ]\n};\n\nconsole.log('=== ELABORAZIONE COMPLETATA ===');\nconsole.log(JSON.stringify(riepilogo, null, 2));\n\nreturn [{ json: riepilogo }];"
+      },
+      "id": "node-log-finale",
+      "name": "✅ Log Elaborazione Completata",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [3760, 200]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Mail ignorata — non è ordine/offerta\nconst item = $input.first();\nconsole.log(`Mail ignorata - Classificazione: ${item.json.classificazione} - Da: ${item.json.mittente}`);\nreturn [{ json: { ...item.json, azione: 'IGNORATA', motivo: 'Non è ordine o offerta' } }];"
+      },
+      "id": "node-mail-ignorata",
+      "name": "🚫 Mail Ignorata",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1340, 560]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Ordine/offerta senza allegati PDF\nconst item = $input.first();\nconsole.log(`Ordine/Offerta senza PDF - Da: ${item.json.mittente} - Oggetto: ${item.json.oggetto}`);\nreturn [{ json: { ...item.json, azione: 'SENZA_PDF', motivo: 'Ordine/offerta ricevuto ma senza allegati PDF' } }];"
+      },
+      "id": "node-senza-pdf",
+      "name": "⚠️ Ordine Senza PDF",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1560, 400]
+    },
+    {
+      "parameters": {
+        "content": "## 🌸 WORKFLOW: VALUTAZIONE NUOVI DISEGNI\n\n**OBIETTIVO:** Analisi automatica dei disegni tecnici ricevuti via email.\n\n**FLUSSO:**\n1. Riceve email da Gmail (polling ogni minuto)\n2. Classifica la mail con Groq AI\n3. Se ORDINE o OFFERTA con PDF allegati:\n   - Crea cartella cliente su Desktop\n   - Converte PDF → PNG con Ghostscript\n   - Invia PNG a Groq Vision (llama-4-scout)\n   - Riceve JSON con ciclo di lavoro\n   - Annota il PDF originale con le fasi\n4. Salva tutti i file nella cartella cliente\n\n**OUTPUT PER OGNI DISEGNO:**\n- PDF originale\n- PNG del disegno\n- JSON analisi completa\n- TXT ciclo di lavoro\n- PDF annotato con ciclo di lavoro",
+        "height": 340,
+        "width": 400,
+        "color": 7
+      },
+      "id": "sticky-descrizione",
+      "name": "🌸 Descrizione Workflow",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [240, 20]
+    },
+    {
+      "parameters": {
+        "content": "## 🟪 PREREQUISITI DI SISTEMA\n\n**DOCKER:**\n- Volume montato: C:/Users/boron/Desktop/VALUTAZIONE NUOVI DISEGNI → /data/valutazione\n- N8N_ENABLE_DANGEROUS_NODES=true\n- N8N_EXECUTE_COMMAND_ENABLED=true\n\n**CREDENZIALI N8N:**\n- Creare credenziale IMAP Gmail\n  (usa App Password Google, non password normale)\n\n**GROQ API:**\n- Key: GROQ_API_KEY_QUI\n- Modello classificazione: llama-3.3-70b-versatile\n- Modello vision: meta-llama/llama-4-scout-17b-16e-instruct\n\n**GHOSTSCRIPT:**\n- Già installato nel container n8n standard\n- Usato per: PDF→PNG e annotazione PDF",
+        "height": 300,
+        "width": 400,
+        "color": 6
+      },
+      "id": "sticky-prerequisiti",
+      "name": "🟪 Prerequisiti Sistema",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [660, 20]
+    },
+    {
+      "parameters": {
+        "content": "## 🟩 ADATTAMENTO MULTI-CLIENT\n\nPer usare questo workflow su server di un cliente:\n\n1. **CREDENZIALE EMAIL:** Cambiare da Gmail a IMAP Aruba\n   - Host: mail.nomedominio.it\n   - Porta: 993 (SSL)\n\n2. **PERCORSO FILE:** Cambiare volume Docker\n   - /data/valutazione → percorso del cliente\n\n3. **API KEY GROQ:** Sostituire con key del cliente\n\n4. **POLLING:** Adattare frequenza se necessario",
+        "height": 220,
+        "width": 400,
+        "color": 3
+      },
+      "id": "sticky-multiclient",
+      "name": "🟩 Adattamento Multi-Client",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [1080, 20]
+    }
+  ],
+  "connections": {
+    "📧 Ricezione Mail Gmail": {
+      "main": [[{"node": "⚙️ Prepara Dati Mail", "type": "main", "index": 0}]]
+    },
+    "⚙️ Prepara Dati Mail": {
+      "main": [[{"node": "🤖 Classifica Mail (Groq)", "type": "main", "index": 0}]]
+    },
+    "🤖 Classifica Mail (Groq)": {
+      "main": [[{"node": "📋 Estrai Classificazione", "type": "main", "index": 0}]]
+    },
+    "📋 Estrai Classificazione": {
+      "main": [[{"node": "🔀 È Ordine o Offerta?", "type": "main", "index": 0}]]
+    },
+    "🔀 È Ordine o Offerta?": {
+      "main": [
+        [{"node": "📎 Ha Allegati PDF?", "type": "main", "index": 0}],
+        [{"node": "🚫 Mail Ignorata", "type": "main", "index": 0}]
+      ]
+    },
+    "📎 Ha Allegati PDF?": {
+      "main": [
+        [{"node": "👤 Estrai Nome Cliente", "type": "main", "index": 0}],
+        [{"node": "⚠️ Ordine Senza PDF", "type": "main", "index": 0}]
+      ]
+    },
+    "👤 Estrai Nome Cliente": {
+      "main": [[{"node": "📁 Crea Cartella Cliente", "type": "main", "index": 0}]]
+    },
+    "📁 Crea Cartella Cliente": {
+      "main": [[{"node": "🔄 Prepara Loop Allegati", "type": "main", "index": 0}]]
+    },
+    "🔄 Prepara Loop Allegati": {
+      "main": [[{"node": "💾 Salva PDF su Disco", "type": "main", "index": 0}]]
+    },
+    "💾 Salva PDF su Disco": {
+      "main": [[{"node": "🖼️ Converti PDF → PNG (Ghostscript)", "type": "main", "index": 0}]]
+    },
+    "🖼️ Converti PDF → PNG (Ghostscript)": {
+      "main": [[{"node": "📖 Leggi PNG → Base64", "type": "main", "index": 0}]]
+    },
+    "📖 Leggi PNG → Base64": {
+      "main": [[{"node": "🤖 Groq Vision → Analisi Disegno", "type": "main", "index": 0}]]
+    },
+    "🤖 Groq Vision → Analisi Disegno": {
+      "main": [[{"node": "📊 Parsa Analisi Groq", "type": "main", "index": 0}]]
+    },
+    "📊 Parsa Analisi Groq": {
+      "main": [[{"node": "✏️ Prepara Annotazione PDF", "type": "main", "index": 0}]]
+    },
+    "✏️ Prepara Annotazione PDF": {
+      "main": [[{"node": "🖊️ Annota PDF (Ghostscript)", "type": "main", "index": 0}]]
+    },
+    "🖊️ Annota PDF (Ghostscript)": {
+      "main": [[{"node": "✅ Log Elaborazione Completata", "type": "main", "index": 0}]]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "saveManualExecutions": true,
+    "callerPolicy": "workflowsFromSameOwner",
+    "errorWorkflow": ""
+  },
+  "staticData": null,
+  "tags": [],
+  "triggerCount": 0,
+  "updatedAt": "2025-06-08T00:00:00.000Z",
+  "versionId": "1"
+}
